@@ -965,11 +965,30 @@ const hasApiKey = GOOGLE_SHEETS_API_KEY && GOOGLE_SHEETS_API_KEY.indexOf('PASTE_
 // Fetch MANY sheet tabs of one spreadsheet in a single HTTP call via batchGet —
 // this is what keeps a full "Semua Properti" refresh to ~3 requests total instead
 // of 40+, which is what was tripping Google's per-minute API quota before.
+const _titleCache = {};
+async function fetchSpreadsheetTitles(sheetId){
+  if(_titleCache[sheetId]) return _titleCache[sheetId];
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?key=${GOOGLE_SHEETS_API_KEY}&fields=sheets.properties.title`;
+  const r = await fetch(url);
+  if(!r.ok) throw new Error('Gagal mengambil daftar sheet: HTTP '+r.status);
+  const json = await r.json();
+  const titles = (json.sheets||[]).map(s => s.properties.title);
+  _titleCache[sheetId] = titles;
+  return titles;
+}
+
 async function fetchSheetsBatch(sheetId, sheetNames, attempt){
   attempt = attempt || 1;
   try{
     if(hasApiKey){
-      const ranges = sheetNames.map(n => `ranges=${encodeURIComponent("'"+n+"'")}`).join('&');
+      // batchGet is all-or-nothing: one requested tab that doesn't exist fails the
+      // WHOLE call. So first check which of the requested tabs actually exist, and
+      // only ask for those — a genuinely missing tab (e.g. a month with no sheet
+      // yet) just comes back empty further down, handled per-month, not fatal.
+      const actualTitles = await fetchSpreadsheetTitles(sheetId);
+      const validNames = sheetNames.filter(n => actualTitles.includes(n));
+      if(!validNames.length) throw new Error('Tidak ada sheet yang cocok ditemukan di spreadsheet ini');
+      const ranges = validNames.map(n => `ranges=${encodeURIComponent("'"+n+"'")}`).join('&');
       const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values:batchGet?${ranges}&key=${GOOGLE_SHEETS_API_KEY}`;
       const r = await fetch(url);
       if(!r.ok){
@@ -979,7 +998,7 @@ async function fetchSheetsBatch(sheetId, sheetNames, attempt){
       }
       const json = await r.json();
       const out = {};
-      (json.valueRanges||[]).forEach((vr, idx) => { out[sheetNames[idx]] = vr.values || []; });
+      (json.valueRanges||[]).forEach((vr, idx) => { out[validNames[idx]] = vr.values || []; });
       return out;
     }
     // no API key configured — fall back to one gviz+proxy request per sheet (slower, more prone to quota issues)
