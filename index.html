@@ -905,18 +905,93 @@ function renderAll(){
 function parseNumeric(v){
   if(v===null || v===undefined) return {ok:false, value:0};
   if(typeof v === 'number') return {ok:Number.isFinite(v), value:Number.isFinite(v)?v:0};
+
   let raw = String(v).trim();
   if(raw === '' || /#REF|#VALUE|#DIV|#N\/A/i.test(raw)) return {ok:false, value:0};
+
   const isPct = raw.includes('%');
-  let str = raw.replace(/Rp/gi,'').replace(/[,\s%]/g,'');
-  // Google Sheets accounting format can render zero as "Rp -" / "Rp - .00".
-  if(str && /^-?(?:0+)?(?:\.0+)?$/.test(str)) return {ok:true, value:0};
-  let n = parseFloat(str);
-  if(isNaN(n)) return {ok:false, value:0};
+  const accountingNegative = /^\s*\(.*\)\s*$/.test(raw);
+
+  // Keep only number punctuation/signs. This supports both:
+  // Indonesian: Rp 27.471.326 / 1.234.567,89
+  // English:    Rp 27,471,326 / 1,234,567.89
+  let str = raw
+    .replace(/Rp/gi,'')
+    .replace(/[^\d.,+\-]/g,'')
+    .replace(/^\+/,'')
+    .trim();
+
+  // Accounting zero such as "Rp -" / "-"
+  if(!str || str === '-') return {ok:true, value:0};
+
+  const sign = str.startsWith('-') ? -1 : 1;
+  str = str.replace(/^[+-]/,'');
+
+  const dotCount = (str.match(/\./g) || []).length;
+  const commaCount = (str.match(/,/g) || []).length;
+
+  if(dotCount && commaCount){
+    // Whichever separator occurs last is treated as the decimal separator.
+    const decimalSep = str.lastIndexOf('.') > str.lastIndexOf(',') ? '.' : ',';
+    const groupSep = decimalSep === '.' ? ',' : '.';
+    str = str.split(groupSep).join('');
+    if(decimalSep === ',') str = str.replace(',', '.');
+  } else if(dotCount || commaCount){
+    const sep = dotCount ? '.' : ',';
+    const count = dotCount || commaCount;
+
+    if(count > 1){
+      // 27.471.326 or 27,471,326
+      str = str.split(sep).join('');
+    } else {
+      const parts = str.split(sep);
+      const before = parts[0] || '0';
+      const after = parts[1] || '';
+
+      if(isPct){
+        // 46,54% or 46.54%
+        str = before + '.' + after;
+      } else if(after.length === 3 && before !== '0'){
+        // Typical thousands grouping: 1.021 / 27.471
+        str = before + after;
+      } else {
+        // Decimal number: 0.4654 / 1.5
+        str = before + (after ? '.' + after : '');
+      }
+    }
+  }
+
+  let n = Number(str);
+  if(!Number.isFinite(n)) return {ok:false, value:0};
+
+  n *= sign;
+  if(accountingNegative) n = -Math.abs(n);
   if(isPct) n = n/100;
+
   return {ok:true, value:n};
 }
 function toNum(v){ return parseNumeric(v).value; }
+
+// Occupancy sheets are not formatted consistently between properties.
+// Some return 0.4654, some "46.54%", and Ratu can return "46.54" without a % sign.
+function toRatio(v){
+  if(typeof v === 'string' && !v.includes('%')){
+    const raw = v.trim().replace(/\s/g,'');
+    // For occupancy specifically, a single comma/dot is treated as decimal,
+    // even when there are three decimal places (e.g. 46.543).
+    if(/^-?\d+(?:[.,]\d+)?$/.test(raw)){
+      let n = Number(raw.replace(',','.'));
+      if(Number.isFinite(n)){
+        if(Math.abs(n) > 1 && Math.abs(n) <= 100) n = n/100;
+        return n;
+      }
+    }
+  }
+
+  let n = toNum(v);
+  if(Math.abs(n) > 1 && Math.abs(n) <= 100) n = n/100;
+  return n;
+}
 function sleep(ms){ return new Promise(res => setTimeout(res, ms)); }
 function shortError(err){
   const msg = err && err.message ? err.message : String(err || 'unknown error');
@@ -1011,7 +1086,7 @@ function parsePeraSummaryRows(rows){
   for(let i=headerIdx+1;i<rows.length && out.length<12;i++){
     const r = rows[i];
     if(!r[0] || String(r[0]).trim()==='') break;
-    out.push({ month:String(r[0]).trim(), occupancy:toNum(r[1]), total_night:toNum(r[2]), gross_revenue:toNum(r[5]), net_revenue:toNum(r[10]), target:toNum(r[11]) });
+    out.push({ month:String(r[0]).trim(), occupancy:toRatio(r[1]), total_night:toNum(r[2]), gross_revenue:toNum(r[5]), net_revenue:toNum(r[10]), target:toNum(r[11]) });
   }
   return out;
 }
@@ -1023,7 +1098,7 @@ function parsePeraOccRows(rows){
     for(let i=headerIdx+1;i<rows.length && occ2025.length<12;i++){
       const r = rows[i];
       if(!r[0] || String(r[0]).trim()==='') break;
-      occ2025.push(toNum(r[5]));
+      occ2025.push(toRatio(r[5]));
       if(r[7] && String(r[7]).toLowerCase().includes('annual') && r[8]) annualTarget = toNum(r[8]);
     }
   }
@@ -1108,7 +1183,7 @@ function parseFamilyBMonthRows(rows, monthIdx){
       const label = String(c).trim();
       const normalized = label.toLowerCase();
       if(label.startsWith('% Occupancy')){
-        if(j+1<r.length) occ = toNum(r[j+1]);
+        if(j+1<r.length) occ = toRatio(r[j+1]);
         for(let k2=j+1;k2<r.length;k2++){
           if(r[k2] && String(r[k2]).toLowerCase().includes('total room')){ if(k2+1<r.length) nights = toNum(r[k2+1]); }
         }
@@ -1187,14 +1262,27 @@ async function syncProperty(key){
     if(!anySuccess) throw new Error('Semua data dari spreadsheet Pera One gagal diproses.');
     p._partialSync = partialFailure;
   } else {
-    const sheetNames = MONTHS.map((m,idx) => familyBMonthSheetName(idx));
+    // Jarapa 2026 starts in March, so JAN 26 and FEB 26 are intentionally absent.
+    // Do not request or count those tabs as sync failures. Ratu still expects all 12 months.
+    const startMonthIdx = key === 'JBH' ? 2 : 0;
+    const expectedMonthIndexes = MONTHS.map((_, idx) => idx).filter(idx => idx >= startMonthIdx);
+    const sheetNames = expectedMonthIndexes.map(idx => familyBMonthSheetName(idx));
     const batch = await fetchSheetsBatch(p.sheet_id, sheetNames);
     const summary = []; const villaData = {}; const sourceRev = {}; const sourceCount = {}; const freshGuests=[]; const failedMonths=new Set();
     let partialFailure = false;
     let anySuccess = false;
     MONTHS.forEach((m, idx) => {
+      // Months before the property's forecast start are valid zero/N/A months, not errors.
+      if(idx < startMonthIdx){
+        const prior = (p.summary || []).find(x=>x.month===m);
+        summary.push(prior || { month:m, occupancy:0, total_night:0, gross_revenue:0, net_revenue:0, target:null });
+        villaData[m] = (p.villa_data && p.villa_data[m]) || {};
+        return;
+      }
+
+      const sheetName = familyBMonthSheetName(idx);
       try{
-        const v = parseFamilyBMonthRows(batch[sheetNames[idx]] || [], idx);
+        const v = parseFamilyBMonthRows(batch[sheetName] || [], idx);
         summary.push({ month:m, occupancy:v.occ, total_night:v.nights, gross_revenue:v.gross, net_revenue:v.net, target:null });
         villaData[m] = v.villas;
         Object.entries(v.sources).forEach(([src,val])=>{ sourceRev[src]=(sourceRev[src]||0)+val; });
