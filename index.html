@@ -1086,7 +1086,7 @@ function parsePeraSummaryRows(rows){
   for(let i=headerIdx+1;i<rows.length && out.length<12;i++){
     const r = rows[i];
     if(!r[0] || String(r[0]).trim()==='') break;
-    out.push({ month:String(r[0]).trim(), occupancy:toRatio(r[1]), total_night:toNum(r[2]), gross_revenue:toNum(r[5]), net_revenue:toNum(r[10]), target:toNum(r[11]) });
+    out.push({ month:String(r[0]).trim(), occupancy:toRatio(r[1]), total_night:toNum(r[2]), gross_revenue:toNum(r[3]), net_revenue:toNum(r[10]), target:toNum(r[11]) });
   }
   return out;
 }
